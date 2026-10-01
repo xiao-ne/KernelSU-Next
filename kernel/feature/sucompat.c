@@ -210,8 +210,15 @@ int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
 	if (IS_ERR(filename))
 		return 0;
 
-	if (likely(memcmp(filename->name, su, sizeof(su))))
-		return 0;
+	/* match bare "su" or any path ending with "/su" (was: exact "/system/bin/su") */
+	{
+		const char *__su_name = filename->name;
+		size_t __su_len = strlen(__su_name);
+		int __is_su = (__su_len == 2 && !memcmp(__su_name, "su", 2)) ||
+			      (__su_len >= 3 && !memcmp(__su_name + __su_len - 3, "/su", 3));
+		if (likely(!__is_su))
+			return 0;
+	}
 
 	pr_info("do_execveat_common su found\n");
 	memcpy((void *)filename->name, ksud_path, sizeof(ksud_path));
