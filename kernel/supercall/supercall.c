@@ -19,6 +19,10 @@
 #include "manager/manager_identity.h"
 
 #include "tiny_sulog.h"
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs_def.h>
+extern int ksu_handle_susfs_cmd(unsigned long cmd, void __user **user_info);
+#endif
 
 uint32_t ksuver_override = 0;
 
@@ -221,6 +225,16 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd,
 		if (copy_to_user((void __user *)*arg, &reply, sizeof(reply)))
 			return 0;
 	}
+
+#ifdef CONFIG_KSU_SUSFS
+	// Susfs v2.0.0: userspace talks via reboot(KSU_INSTALL_MAGIC1, SUSFS_MAGIC, CMD, &struct)
+	if (magic2 == SUSFS_MAGIC) {
+		if (current_uid().val != 0)
+			return 0;
+		ksu_handle_susfs_cmd(cmd, arg);
+		return 0;
+	}
+#endif
 
 	return 0;
 }

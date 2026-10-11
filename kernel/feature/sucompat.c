@@ -32,6 +32,7 @@
 #include "policy/app_profile.h"
 #include "selinux/selinux.h"
 #include "tiny_sulog.h"
+#include <linux/susfs.h>
 
 #define SU_PATH "/system/bin/su"
 #define SH_PATH "/system/bin/sh"
@@ -254,6 +255,146 @@ int __ksu_handle_devpts(struct inode *inode)
 		sec->sid = ksu_file_sid;
 	return 0;
 }
+
+/* Susfs v2.0.0 prctl handler */
+#ifdef CONFIG_KSU_SUSFS
+#define KERNEL_SU_OPTION 0xDEADBEEF
+
+#ifdef CONFIG_KSU_SUSFS
+/* Susfs v2.0.0 command dispatcher, shared by prctl and reboot-syscall paths.
+ * user_info is a pointer to the user-space pointer holding the command struct. */
+int ksu_handle_susfs_cmd(unsigned long cmd, void __user **user_info)
+{
+	switch (cmd) {
+	case CMD_SUSFS_ADD_SUS_PATH:
+		susfs_add_sus_path(user_info);
+		return 0;
+	case CMD_SUSFS_ADD_SUS_PATH_LOOP:
+		susfs_add_sus_path_loop(user_info);
+		return 0;
+	case CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS:
+		susfs_set_hide_sus_mnts_for_non_su_procs(user_info);
+		return 0;
+	case CMD_SUSFS_ADD_SUS_KSTAT:
+	case CMD_SUSFS_ADD_SUS_KSTAT_STATICALLY:
+		susfs_add_sus_kstat(user_info);
+		return 0;
+	case CMD_SUSFS_UPDATE_SUS_KSTAT:
+		susfs_update_sus_kstat(user_info);
+		return 0;
+	case CMD_SUSFS_SET_UNAME:
+		susfs_set_uname(user_info);
+		return 0;
+	case CMD_SUSFS_ENABLE_LOG:
+		susfs_enable_log(user_info);
+		return 0;
+#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+	case CMD_SUSFS_SET_CMDLINE_OR_BOOTCONFIG:
+		susfs_set_cmdline_or_bootconfig(user_info);
+		return 0;
+#endif
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+	case CMD_SUSFS_ADD_OPEN_REDIRECT:
+		susfs_add_open_redirect(user_info);
+		return 0;
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+	case CMD_SUSFS_ADD_SUS_MAP:
+		susfs_add_sus_map(user_info);
+		return 0;
+#endif
+	case CMD_SUSFS_ENABLE_AVC_LOG_SPOOFING:
+		susfs_set_avc_log_spoofing(user_info);
+		return 0;
+	case CMD_SUSFS_SHOW_ENABLED_FEATURES:
+		susfs_get_enabled_features(user_info);
+		return 0;
+	case CMD_SUSFS_SHOW_VARIANT:
+		susfs_show_variant(user_info);
+		return 0;
+	case CMD_SUSFS_SHOW_VERSION:
+		susfs_show_version(user_info);
+		return 0;
+	default:
+		return -1;
+	}
+}
+#endif /* CONFIG_KSU_SUSFS */
+
+int ksu_handle_susfs_prctl(int option, unsigned long arg2,
+				  unsigned long arg3, unsigned long arg4,
+				  unsigned long arg5)
+{
+	if (option != KERNEL_SU_OPTION)
+		return 0;
+
+	if (current_uid().val != 0)
+		return 1;
+
+	void __user *uptr = (void __user *)arg3;
+
+	switch (arg2) {
+	case CMD_SUSFS_ADD_SUS_PATH:
+		susfs_add_sus_path(&uptr);
+		return 1;
+	case CMD_SUSFS_ADD_SUS_PATH_LOOP:
+		susfs_add_sus_path_loop(&uptr);
+		return 1;
+	case CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS:
+		susfs_set_hide_sus_mnts_for_non_su_procs(&uptr);
+		return 1;
+	case CMD_SUSFS_ADD_SUS_KSTAT:
+	case CMD_SUSFS_ADD_SUS_KSTAT_STATICALLY:
+		susfs_add_sus_kstat(&uptr);
+		return 1;
+	case CMD_SUSFS_UPDATE_SUS_KSTAT:
+		susfs_update_sus_kstat(&uptr);
+		return 1;
+	case CMD_SUSFS_SET_UNAME:
+		susfs_set_uname(&uptr);
+		return 1;
+	case CMD_SUSFS_ENABLE_LOG:
+		susfs_enable_log(&uptr);
+		return 1;
+#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+	case CMD_SUSFS_SET_CMDLINE_OR_BOOTCONFIG:
+		susfs_set_cmdline_or_bootconfig(&uptr);
+		return 1;
+#endif
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+	case CMD_SUSFS_ADD_OPEN_REDIRECT:
+		susfs_add_open_redirect(&uptr);
+		return 1;
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+	case CMD_SUSFS_ADD_SUS_MAP:
+		susfs_add_sus_map(&uptr);
+		return 1;
+#endif
+	case CMD_SUSFS_ENABLE_AVC_LOG_SPOOFING:
+		susfs_set_avc_log_spoofing(&uptr);
+		return 1;
+	case CMD_SUSFS_SHOW_ENABLED_FEATURES:
+		susfs_get_enabled_features(&uptr);
+		return 1;
+	case CMD_SUSFS_SHOW_VARIANT:
+		susfs_show_variant(&uptr);
+		return 1;
+	case CMD_SUSFS_SHOW_VERSION:
+		susfs_show_version(&uptr);
+		return 1;
+	default:
+		return 0;
+	}
+}
+#endif /* CONFIG_KSU_SUSFS */
+
+#ifdef CONFIG_KSU_SUSFS
+bool susfs_is_current_ksu_domain(void)
+{
+	return is_ksu_domain();
+}
+#endif /* CONFIG_KSU_SUSFS */
 
 // dead code: devpts handling
 int __maybe_unused ksu_handle_devpts(struct inode *inode)
