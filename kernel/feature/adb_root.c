@@ -67,8 +67,8 @@ static long setup_ld_preload(struct pt_regs *regs, unsigned long *envp_p)
 {
     static const char kLdPreload[] = "LD_PRELOAD=/data/adb/ksu/lib/libadbroot.so";
     static const char kLdLibraryPath[] = "LD_LIBRARY_PATH=/data/adb/ksu/lib";
-    static const size_t kReadEnvBatch = 16;
     static const size_t kPtrSize = sizeof(unsigned long);
+    static const size_t kMaxEnvCount = 1024;
     unsigned long stackp = user_stack_pointer(regs);
     unsigned long envp, ld_preload_p, ld_library_path_p;
     unsigned long *tmp_env_p = NULL, *tmp_env_p2 = NULL;
@@ -91,43 +91,43 @@ static long setup_ld_preload(struct pt_regs *regs, unsigned long *envp_p)
         return -EFAULT;
     }
 
+    /*
+     * Walk the caller's envp one pointer at a time: copying a whole batch
+     * faults as soon as the array is followed by an unmapped page, and a
+     * single element read tells us exactly where the array ends.
+     */
     for (;;) {
-        tmp_env_p2 = krealloc(tmp_env_p, (env_count + kReadEnvBatch + 2) * kPtrSize, GFP_KERNEL);
+        unsigned long entry;
+
+        if (env_count >= kMaxEnvCount) {
+            pr_err("envp array too long, skip adb root\n");
+            ret = -E2BIG;
+            goto out_release_env_p;
+        }
+
+        tmp_env_p2 = krealloc(tmp_env_p, (env_count + 3) * kPtrSize, GFP_KERNEL);
         if (tmp_env_p2 == NULL) {
             pr_err("alloc tmp env failed\n");
             ret = -ENOMEM;
             goto out_release_env_p;
         }
         tmp_env_p = tmp_env_p2;
-        ret = copy_from_user(&tmp_env_p[env_count], envp + env_count * kPtrSize, kReadEnvBatch * kPtrSize);
-        if (ret < 0) {
-            pr_warn("Access envp when adb_root_handle_execve failed: %ld\n", ret);
-            ret = -EFAULT;
-            goto out_release_env_p;
-        }
-        size_t read_count = kReadEnvBatch * kPtrSize - ret;
-        size_t max_new_env_count = read_count / kPtrSize, new_env_count = 0;
-        bool meet_zero = false;
-        for (; new_env_count < max_new_env_count; new_env_count++) {
-            if (!tmp_env_p[new_env_count + env_count]) {
-                meet_zero = true;
-                break;
-            }
-        }
-        if (!meet_zero) {
-            if (read_count % kPtrSize != 0) {
-                pr_err("unaligned envp array!\n");
-                ret = -EFAULT;
-                goto out_release_env_p;
-            } else if (ret != 0) {
-                pr_err("truncated envp array!\n");
-                ret = -EFAULT;
-                goto out_release_env_p;
-            }
-        }
-        env_count += new_env_count;
-        if (meet_zero)
+
+        if (copy_from_user(&entry, (void __user *)(envp + env_count * kPtrSize),
+                           kPtrSize)) {
+            /* unmapped tail counts as the end of the array */
             break;
+        }
+        if (!entry) {
+            break;
+        }
+        tmp_env_p[env_count++] = entry;
+    }
+
+    if (env_count == 0) {
+        pr_err("adb_root: cannot read envp, skip\n");
+        ret = -EFAULT;
+        goto out_release_env_p;
     }
 
     // We should have allocated enough memory
@@ -156,6 +156,24 @@ out_release_env_p:
     return ret;
 }
 
+static long adb_root_apply(struct pt_regs *regs, unsigned long *envp_p)
+{
+    long ret;
+
+    if (unlikely(is_libadbroot_ok() != 1)) {
+        return 0;
+    }
+
+    ret = setup_ld_preload(regs, envp_p);
+    if (ret) {
+        return ret;
+    }
+
+    pr_info("escape to root for adb\n");
+    escape_to_root_for_adb_root();
+    return 0;
+}
+
 static long do_ksu_adb_root_handle_execve(const char __user *filename_user,
 					  struct pt_regs *regs,
 					  unsigned long *envp_p)
@@ -164,18 +182,7 @@ static long do_ksu_adb_root_handle_execve(const char __user *filename_user,
         return 0;
     }
 
-    if (unlikely(is_libadbroot_ok() != 1)) {
-        return 0;
-    }
-
-    long ret = setup_ld_preload(regs, envp_p);
-    if (ret) {
-        return ret;
-    }
-
-    pr_info("escape to root for adb\n");
-    escape_to_root_for_adb_root();
-    return 0;
+    return adb_root_apply(regs, envp_p);
 }
 
 long ksu_adb_root_handle_execve(struct pt_regs *regs)
@@ -196,6 +203,65 @@ long ksu_adb_root_handle_execveat(struct pt_regs *regs)
                 (unsigned long *)&PT_REGS_SYSCALL_PARM4(regs));
     }
     return 0;
+}
+
+/*
+ * Manual-hook entry point.  On kernels below 4.17 with CONFIG_KSU_MANUAL_HOOK
+ * there is no kprobe and no syscall-table hook, so the pt_regs based helpers
+ * above never run.  fs/exec.c already resolved the path into a kernel
+ * filename and owns the struct user_arg_ptr copy of envp, so matching the
+ * name here and rewriting the caller's envp pointer through the same
+ * user-stack trick is enough to preload libadbroot.so.
+ */
+static long is_adbd_kernel_path(const char *name)
+{
+    static const char kAdbd[] = "/adbd";
+    static const size_t kAdbdLen = sizeof(kAdbd) - 1;
+    size_t len;
+
+    if (!name) {
+        return 0;
+    }
+
+    len = strlen(name);
+    if (len < kAdbdLen) {
+        return 0;
+    }
+
+    return memcmp(name + len - kAdbdLen, kAdbd, kAdbdLen + 1) == 0 ? 1 : 0;
+}
+
+long ksu_adb_root_handle_execve_kargs(const char *path, void *envp_p)
+{
+    struct pt_regs *regs;
+    int ppid;
+
+    if (!static_branch_unlikely(&ksu_adb_root)) {
+        return 0;
+    }
+
+    if (is_adbd_kernel_path(path) != 1) {
+        return 0;
+    }
+
+    /*
+     * init starts services through a forked child and sets the service's
+     * SELinux label (setexeccon) before execve(), so the creds are already
+     * u:r:adbd:s0 by the time the exec reaches us and is_init() alone would
+     * reject every adbd start.  Accept init's direct children as well.
+     */
+    ppid = current->real_parent ? current->real_parent->pid : -1;
+    if (current->pid == 1 || (ppid != 1 && !is_init(current_cred()))) {
+        return 0;
+    }
+
+    regs = current_pt_regs();
+    if (!regs) {
+        pr_warn("adb_root: no pt_regs, skip\n");
+        return 0;
+    }
+
+    return adb_root_apply(regs, (unsigned long *)envp_p);
 }
 
 static int kernel_adb_root_feature_get(u64 *value)
