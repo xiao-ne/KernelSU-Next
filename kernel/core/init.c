@@ -20,6 +20,7 @@
 #include "feature/sulog.h"
 #include "infra/file_wrapper.h"
 #include "selinux/selinux.h"
+#include "selinux/permissive.h"
 #include "feature/selinux_hide.h"
 #include "feature/adb_root.h"
 
@@ -140,6 +141,8 @@ int __init kernelsu_init(void)
 	ksu_supercalls_init();
 
 	ksu_app_profile_init();
+
+	ksu_permissive_persist_init();
 
 	if (ksu_late_loaded) {
 		pr_info("late load mode, skipping kprobe hooks\n");
